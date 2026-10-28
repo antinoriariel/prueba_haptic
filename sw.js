@@ -1,4 +1,4 @@
-const CACHE = 'haptica-v2';
+const CACHE = 'haptica-v3';
 const ARCHIVOS = ['./', 'index.html', 'manifest.webmanifest', 'vendor/mqtt.min.js', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {

@@ -49,9 +49,24 @@
       transition: transform .08s, opacity .15s;
     }
     button:active { transform: scale(.96); }
-    button:disabled { opacity: .35; transform: none; }
     button small { display: block; font-weight: 400; opacity: .8; margin-top: 4px; font-size: .9rem; }
-    button.secundario { padding: 14px 16px; font-size: 1rem; font-weight: 500; background: transparent; border: 1px solid #4b5563; }
+    button.secundario, a.boton {
+      display: block;
+      width: 100%;
+      padding: 14px 16px;
+      font-size: 1rem;
+      font-weight: 500;
+      text-align: center;
+      text-decoration: none;
+      color: #fff;
+      background: transparent;
+      border: 1px solid #4b5563;
+      border-radius: 16px;
+    }
+    .ntfy { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; background: #1f2937; }
+    .ntfy p { margin: 0; color: #d1d5db; font-size: .95rem; line-height: 1.4; }
+    .ntfy code { font-size: .95rem; color: #93c5fd; word-break: break-all; -webkit-user-select: all; user-select: all; }
+    .ntfy a.enlace { color: #93c5fd; font-size: .9rem; text-align: center; }
     .botonera { display: flex; flex-direction: column; gap: 20px; }
     input {
       width: 100%;
@@ -101,6 +116,12 @@
     <div class="codigo"><span>Código de sala</span><strong id="sala-codigo"></strong></div>
     <button id="compartir" class="secundario">Compartir enlace</button>
     <div class="estado"><span class="punto" id="estado-punto"></span><span id="estado-texto"></span></div>
+    <div class="ntfy" id="bloque-ntfy">
+      <p><strong>Con el móvil bloqueado</strong> la vibración llega por la app <strong>ntfy</strong>. Instálala, suscríbete a este tema y activa la «entrega instantánea»:</p>
+      <code id="ntfy-tema"></code>
+      <a class="boton" id="ntfy-suscribir">Suscribirme en ntfy</a>
+      <a class="enlace" href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener">Instalar ntfy desde Google Play</a>
+    </div>
     <div class="botonera" id="botonera-remota"></div>
     <p class="registro" id="sala-registro"></p>
     <button class="secundario" id="salir">Salir</button>
@@ -117,13 +138,14 @@
   <script>
     const BROKER = 'wss://broker.emqx.io:8084/mqtt';
     const PREFIJO = 'antinoriariel/prueba_haptic/v1/';
+    const NTFY = 'https://ntfy.sh/';
     const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const TIPOS = [
-      { nombre: 'Vibración larga', ms: 1000, color: '#2563eb' },
-      { nombre: 'Vibración corta', ms: 200, color: '#16a34a' },
-      { nombre: 'Vibración extra corta', ms: 40, color: '#ea580c' },
+      // prioridad: nivel de ntfy (5 = vibración muy larga, 4 = larga, 3 = corta)
+      { nombre: 'Vibración larga', ms: 1000, prioridad: 5, color: '#2563eb' },
+      { nombre: 'Vibración corta', ms: 200, prioridad: 4, color: '#16a34a' },
+      { nombre: 'Vibración extra corta', ms: 40, prioridad: 3, color: '#ea580c' },
     ];
-    const OTRO = { servidor: 'cliente', cliente: 'servidor' };
 
     const $ = id => document.getElementById(id);
     const soportaVibracion = 'vibrate' in navigator;
@@ -148,19 +170,29 @@
         const b = document.createElement('button');
         b.style.background = t.color;
         b.innerHTML = `${t.nombre}<small>${t.ms} ms</small>`;
-        b.addEventListener('click', () => alPulsar(t.ms));
+        b.addEventListener('click', () => alPulsar(t));
         contenedor.append(b);
       }
     }
+
+    const temaNtfy = codigo => 'antinoriariel_haptic_' + codigo;
 
     function generarCodigo() {
       const n = crypto.getRandomValues(new Uint32Array(4));
       return Array.from(n, x => ALFABETO[x % ALFABETO.length]).join('');
     }
 
+    // Se recuerdan los códigos para no tener que volver a suscribirse en ntfy cada vez
+    function leer(clave) {
+      try { return localStorage.getItem(clave); } catch { return null; }
+    }
+    function guardar(clave, valor) {
+      try { localStorage.setItem(clave, valor); } catch {}
+    }
+
     // --- Prueba local ---
 
-    crearBotonera($('botonera-local'), ms => {
+    crearBotonera($('botonera-local'), ({ ms }) => {
       if (!soportaVibracion) return registro($('local-registro'), 'Este navegador no soporta la API de vibración.', true);
       const ok = vibrar(ms);
       registro($('local-registro'), ok ? `Vibrando ${ms} ms` : 'El dispositivo rechazó la vibración.', !ok);
@@ -168,7 +200,7 @@
 
     // --- Sala remota (servidor recibe, cliente envía) ---
 
-    let sesion = null;   // { rol, codigo, mqtt, enviar }
+    let sesion = null;   // { rol, codigo, mqtt, enviar, otroPresente }
     let wakeLock = null;
     let siguienteId = 0;
     const pendientes = new Map();
@@ -178,10 +210,15 @@
       $('estado-punto').className = 'punto ' + tipo;
     }
 
+    // En el cliente, «presente» significa que el servidor tiene la app en pantalla:
+    // si no, las vibraciones se envían por ntfy para que lleguen con el móvil bloqueado.
     function setOtroPresente(presente) {
-      const otro = OTRO[sesion.rol];
-      estado(presente ? `${otro[0].toUpperCase() + otro.slice(1)} conectado` : `Esperando ${otro}…`, presente ? 'ok' : 'espera');
-      $('botonera-remota').querySelectorAll('button').forEach(b => b.disabled = !presente);
+      sesion.otroPresente = presente;
+      if (sesion.rol === 'servidor') {
+        estado(presente ? 'Cliente conectado' : 'Esperando cliente…', presente ? 'ok' : 'espera');
+      } else {
+        estado(presente ? 'Servidor conectado' : 'Servidor sin pantalla: se enviará por ntfy', presente ? 'ok' : 'espera');
+      }
     }
 
     async function mantenerPantalla() {
@@ -189,11 +226,15 @@
     }
 
     function entrarSala(rol, codigo) {
+      guardar(rol === 'servidor' ? 'codigo-servidor' : 'codigo-cliente', codigo);
       const topic = PREFIJO + codigo;
       const esServidor = rol === 'servidor';
       $('sala-titulo').textContent = esServidor ? 'Recibiendo vibraciones' : 'Enviando vibraciones';
       $('sala-codigo').textContent = codigo;
       $('compartir').hidden = !esServidor;
+      $('bloque-ntfy').hidden = !esServidor;
+      $('ntfy-tema').textContent = temaNtfy(codigo);
+      $('ntfy-suscribir').href = 'ntfy://ntfy.sh/' + temaNtfy(codigo);
       $('botonera-remota').hidden = esServidor;
       registro($('sala-registro'), esServidor && !soportaVibracion ? 'Este navegador no soporta la API de vibración.' : '', !soportaVibracion);
       mostrar('sala');
@@ -223,7 +264,8 @@
         if (m.de === rol) return; // el broker nos devuelve nuestros propios mensajes
 
         if (m.tipo === 'hola') {
-          if (!m.respuesta) enviar({ tipo: 'hola', respuesta: true });
+          // Con la pantalla apagada el servidor no se anuncia: el cliente debe usar ntfy
+          if (!m.respuesta && !(esServidor && document.hidden)) enviar({ tipo: 'hola', respuesta: true });
           setOtroPresente(true);
         } else if (m.tipo === 'adios') {
           setOtroPresente(false);
@@ -255,11 +297,24 @@
       mostrar('inicio');
     }
 
-    crearBotonera($('botonera-remota'), ms => {
-      const id = ++siguienteId;
-      pendientes.set(id, performance.now());
-      sesion.enviar({ tipo: 'vibrar', ms, id });
-      registro($('sala-registro'), `Enviado: ${ms} ms…`);
+    crearBotonera($('botonera-remota'), async t => {
+      if (sesion.otroPresente) {
+        const id = ++siguienteId;
+        pendientes.set(id, performance.now());
+        sesion.enviar({ tipo: 'vibrar', ms: t.ms, id });
+        return registro($('sala-registro'), `Enviado: ${t.ms} ms…`);
+      }
+      registro($('sala-registro'), 'Enviando por ntfy…');
+      try {
+        const r = await fetch(NTFY, {
+          method: 'POST',
+          body: JSON.stringify({ topic: temaNtfy(sesion.codigo), title: t.nombre, message: 'Prueba Háptica', priority: t.prioridad, tags: ['vibration_mode'] }),
+        });
+        if (!r.ok) throw new Error(r.status);
+        registro($('sala-registro'), `Enviado por ntfy: ${t.nombre.toLowerCase()}`);
+      } catch {
+        registro($('sala-registro'), 'No se pudo enviar por ntfy.', true);
+      }
     });
 
     $('compartir').addEventListener('click', async () => {
@@ -277,14 +332,24 @@
     });
 
     document.addEventListener('visibilitychange', () => {
-      if (sesion?.rol === 'servidor' && document.visibilityState === 'visible') mantenerPantalla();
+      if (sesion?.rol !== 'servidor') return;
+      if (document.visibilityState === 'visible') {
+        mantenerPantalla();
+        sesion.enviar({ tipo: 'hola' });
+      } else {
+        sesion.enviar({ tipo: 'adios' });
+      }
     });
     addEventListener('pagehide', () => sesion?.enviar({ tipo: 'adios' }));
 
     // --- Navegación ---
 
-    $('ir-servidor').addEventListener('click', () => entrarSala('servidor', generarCodigo()));
-    $('ir-cliente').addEventListener('click', () => { mostrar('unirse'); $('input-codigo').focus(); });
+    $('ir-servidor').addEventListener('click', () => entrarSala('servidor', leer('codigo-servidor') || generarCodigo()));
+    $('ir-cliente').addEventListener('click', () => {
+      $('input-codigo').value = leer('codigo-cliente') || '';
+      mostrar('unirse');
+      $('input-codigo').focus();
+    });
     $('ir-local').addEventListener('click', () => mostrar('local'));
     $('salir').addEventListener('click', salirSala);
     document.querySelectorAll('.volver').forEach(b => b.addEventListener('click', () => mostrar('inicio')));
