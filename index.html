@@ -10,69 +10,297 @@
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <style>
     * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
     body {
       margin: 0;
       min-height: 100dvh;
       display: flex;
-      flex-direction: column;
-      align-items: center;
       justify-content: center;
-      gap: 20px;
       padding: 24px 16px;
       font-family: system-ui, -apple-system, sans-serif;
       background: #111827;
       color: #f9fafb;
       -webkit-user-select: none;
       user-select: none;
+      transition: background .15s;
     }
-    h1 { margin: 0 0 8px; font-size: 1.5rem; }
-    button {
+    body.destello { background: #1e3a8a; }
+    section {
       width: 100%;
       max-width: 360px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 20px;
+    }
+    h1 { margin: 0 0 8px; font-size: 1.5rem; text-align: center; }
+    button {
+      width: 100%;
       padding: 28px 16px;
+      font: inherit;
       font-size: 1.25rem;
       font-weight: 600;
       color: #fff;
+      background: #374151;
       border: none;
       border-radius: 16px;
       cursor: pointer;
       touch-action: manipulation;
-      transition: transform .08s;
+      transition: transform .08s, opacity .15s;
     }
     button:active { transform: scale(.96); }
+    button:disabled { opacity: .35; transform: none; }
     button small { display: block; font-weight: 400; opacity: .8; margin-top: 4px; font-size: .9rem; }
-    #larga { background: #2563eb; }
-    #corta { background: #16a34a; }
-    #extra { background: #ea580c; }
-    #estado { min-height: 1.5em; color: #9ca3af; text-align: center; }
-    #estado.error { color: #f87171; }
+    button.secundario { padding: 14px 16px; font-size: 1rem; font-weight: 500; background: transparent; border: 1px solid #4b5563; }
+    .botonera { display: flex; flex-direction: column; gap: 20px; }
+    input {
+      width: 100%;
+      padding: 18px;
+      font: inherit;
+      font-size: 2rem;
+      letter-spacing: .4em;
+      text-align: center;
+      text-transform: uppercase;
+      color: #f9fafb;
+      background: #1f2937;
+      border: 1px solid #4b5563;
+      border-radius: 16px;
+    }
+    .codigo { text-align: center; }
+    .codigo span { display: block; color: #9ca3af; font-size: .9rem; }
+    .codigo strong { font-size: 3rem; letter-spacing: .3em; padding-left: .3em; }
+    .estado { display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .punto { width: 10px; height: 10px; border-radius: 50%; background: #6b7280; }
+    .punto.espera { background: #eab308; }
+    .punto.ok { background: #22c55e; }
+    .punto.error { background: #ef4444; }
+    .registro { min-height: 1.5em; margin: 0; color: #9ca3af; text-align: center; }
+    .registro.error { color: #f87171; }
   </style>
 </head>
 <body>
-  <h1>Prueba Háptica</h1>
-  <button id="larga" data-ms="1000">Vibración larga<small>1000 ms</small></button>
-  <button id="corta" data-ms="200">Vibración corta<small>200 ms</small></button>
-  <button id="extra" data-ms="40">Vibración extra corta<small>40 ms</small></button>
-  <p id="estado"></p>
+  <section id="inicio">
+    <h1>Prueba Háptica</h1>
+    <button id="ir-servidor">Recibir vibraciones<small>Este móvil vibra (servidor)</small></button>
+    <button id="ir-cliente">Enviar vibraciones<small>Este móvil hace vibrar al otro (cliente)</small></button>
+    <button id="ir-local" class="secundario">Probar en este móvil</button>
+    <p class="registro error" id="aviso-vibracion"></p>
+  </section>
 
+  <section id="unirse" hidden>
+    <h1>Unirse a una sala</h1>
+    <form id="form-unirse">
+      <input id="input-codigo" maxlength="4" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="CÓDIGO" required>
+    </form>
+    <button form="form-unirse">Conectar</button>
+    <button class="secundario volver">Volver</button>
+  </section>
+
+  <section id="sala" hidden>
+    <h1 id="sala-titulo"></h1>
+    <div class="codigo"><span>Código de sala</span><strong id="sala-codigo"></strong></div>
+    <button id="compartir" class="secundario">Compartir enlace</button>
+    <div class="estado"><span class="punto" id="estado-punto"></span><span id="estado-texto"></span></div>
+    <div class="botonera" id="botonera-remota"></div>
+    <p class="registro" id="sala-registro"></p>
+    <button class="secundario" id="salir">Salir</button>
+  </section>
+
+  <section id="local" hidden>
+    <h1>Prueba en este móvil</h1>
+    <div class="botonera" id="botonera-local"></div>
+    <p class="registro" id="local-registro"></p>
+    <button class="secundario volver">Volver</button>
+  </section>
+
+  <script src="vendor/mqtt.min.js"></script>
   <script>
-    const estado = document.getElementById('estado');
+    const BROKER = 'wss://broker.emqx.io:8084/mqtt';
+    const PREFIJO = 'antinoriariel/prueba_haptic/v1/';
+    const ALFABETO = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const TIPOS = [
+      { nombre: 'Vibración larga', ms: 1000, color: '#2563eb' },
+      { nombre: 'Vibración corta', ms: 200, color: '#16a34a' },
+      { nombre: 'Vibración extra corta', ms: 40, color: '#ea580c' },
+    ];
+    const OTRO = { servidor: 'cliente', cliente: 'servidor' };
 
-    if (!('vibrate' in navigator)) {
-      estado.textContent = 'Este navegador no soporta la API de vibración.';
-      estado.className = 'error';
+    const $ = id => document.getElementById(id);
+    const soportaVibracion = 'vibrate' in navigator;
+
+    function mostrar(pantalla) {
+      document.querySelectorAll('section').forEach(s => s.hidden = s.id !== pantalla);
     }
 
-    document.querySelectorAll('button').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const ms = Number(btn.dataset.ms);
-        if (!('vibrate' in navigator)) return;
-        navigator.vibrate(0); // corta cualquier vibración en curso
-        const ok = navigator.vibrate(ms);
-        estado.className = ok ? '' : 'error';
-        estado.textContent = ok ? `Vibrando ${ms} ms` : 'El dispositivo rechazó la vibración.';
-      });
+    function registro(el, texto, error = false) {
+      el.textContent = texto;
+      el.classList.toggle('error', error);
+    }
+
+    function vibrar(ms) {
+      if (!soportaVibracion) return false;
+      navigator.vibrate(0); // corta cualquier vibración en curso
+      return navigator.vibrate(ms);
+    }
+
+    function crearBotonera(contenedor, alPulsar) {
+      for (const t of TIPOS) {
+        const b = document.createElement('button');
+        b.style.background = t.color;
+        b.innerHTML = `${t.nombre}<small>${t.ms} ms</small>`;
+        b.addEventListener('click', () => alPulsar(t.ms));
+        contenedor.append(b);
+      }
+    }
+
+    function generarCodigo() {
+      const n = crypto.getRandomValues(new Uint32Array(4));
+      return Array.from(n, x => ALFABETO[x % ALFABETO.length]).join('');
+    }
+
+    // --- Prueba local ---
+
+    crearBotonera($('botonera-local'), ms => {
+      if (!soportaVibracion) return registro($('local-registro'), 'Este navegador no soporta la API de vibración.', true);
+      const ok = vibrar(ms);
+      registro($('local-registro'), ok ? `Vibrando ${ms} ms` : 'El dispositivo rechazó la vibración.', !ok);
     });
+
+    // --- Sala remota (servidor recibe, cliente envía) ---
+
+    let sesion = null;   // { rol, codigo, mqtt, enviar }
+    let wakeLock = null;
+    let siguienteId = 0;
+    const pendientes = new Map();
+
+    function estado(texto, tipo) {
+      $('estado-texto').textContent = texto;
+      $('estado-punto').className = 'punto ' + tipo;
+    }
+
+    function setOtroPresente(presente) {
+      const otro = OTRO[sesion.rol];
+      estado(presente ? `${otro[0].toUpperCase() + otro.slice(1)} conectado` : `Esperando ${otro}…`, presente ? 'ok' : 'espera');
+      $('botonera-remota').querySelectorAll('button').forEach(b => b.disabled = !presente);
+    }
+
+    async function mantenerPantalla() {
+      try { wakeLock = await navigator.wakeLock?.request('screen'); } catch {}
+    }
+
+    function entrarSala(rol, codigo) {
+      const topic = PREFIJO + codigo;
+      const esServidor = rol === 'servidor';
+      $('sala-titulo').textContent = esServidor ? 'Recibiendo vibraciones' : 'Enviando vibraciones';
+      $('sala-codigo').textContent = codigo;
+      $('compartir').hidden = !esServidor;
+      $('botonera-remota').hidden = esServidor;
+      registro($('sala-registro'), esServidor && !soportaVibracion ? 'Este navegador no soporta la API de vibración.' : '', !soportaVibracion);
+      mostrar('sala');
+      if (esServidor) mantenerPantalla();
+
+      const cliente = mqtt.connect(BROKER, {
+        keepalive: 15,
+        connectTimeout: 10000,
+        will: { topic, payload: JSON.stringify({ de: rol, tipo: 'adios' }), qos: 0, retain: false },
+      });
+      const enviar = msg => cliente.publish(topic, JSON.stringify({ de: rol, ...msg }));
+      sesion = { rol, codigo, mqtt: cliente, enviar };
+      setOtroPresente(false);
+      estado('Conectando…', 'espera');
+
+      cliente.on('connect', () => cliente.subscribe(topic, err => {
+        if (err) return estado('Error al unirse a la sala', 'error');
+        setOtroPresente(false);
+        enviar({ tipo: 'hola' });
+      }));
+      cliente.on('reconnect', () => estado('Reconectando…', 'error'));
+      cliente.on('offline', () => estado('Sin conexión', 'error'));
+
+      cliente.on('message', (_, payload) => {
+        let m;
+        try { m = JSON.parse(payload); } catch { return; }
+        if (m.de === rol) return; // el broker nos devuelve nuestros propios mensajes
+
+        if (m.tipo === 'hola') {
+          if (!m.respuesta) enviar({ tipo: 'hola', respuesta: true });
+          setOtroPresente(true);
+        } else if (m.tipo === 'adios') {
+          setOtroPresente(false);
+        } else if (m.tipo === 'vibrar' && esServidor) {
+          setOtroPresente(true);
+          const ok = vibrar(m.ms);
+          enviar({ tipo: 'vibrado', id: m.id, ok });
+          registro($('sala-registro'), ok ? `Recibido: vibración de ${m.ms} ms` : `Recibido ${m.ms} ms, pero el dispositivo rechazó la vibración.`, !ok);
+          document.body.classList.add('destello');
+          setTimeout(() => document.body.classList.remove('destello'), Math.max(m.ms, 150));
+        } else if (m.tipo === 'vibrado' && !esServidor) {
+          const t0 = pendientes.get(m.id);
+          pendientes.delete(m.id);
+          const idaVuelta = t0 ? ` (${Math.round(performance.now() - t0)} ms ida y vuelta)` : '';
+          registro($('sala-registro'), m.ok ? `Vibró en el otro móvil${idaVuelta}` : 'El otro móvil no pudo vibrar.', !m.ok);
+        }
+      });
+    }
+
+    function salirSala() {
+      if (!sesion) return;
+      sesion.enviar({ tipo: 'adios' });
+      sesion.mqtt.end();
+      sesion = null;
+      wakeLock?.release();
+      wakeLock = null;
+      pendientes.clear();
+      history.replaceState(null, '', location.pathname);
+      mostrar('inicio');
+    }
+
+    crearBotonera($('botonera-remota'), ms => {
+      const id = ++siguienteId;
+      pendientes.set(id, performance.now());
+      sesion.enviar({ tipo: 'vibrar', ms, id });
+      registro($('sala-registro'), `Enviado: ${ms} ms…`);
+    });
+
+    $('compartir').addEventListener('click', async () => {
+      const url = location.origin + location.pathname + '#' + sesion.codigo;
+      if (navigator.share) {
+        try { await navigator.share({ title: 'Prueba Háptica', text: `Únete con el código ${sesion.codigo}`, url }); } catch {}
+      } else {
+        try {
+          await navigator.clipboard.writeText(url);
+          registro($('sala-registro'), 'Enlace copiado');
+        } catch {
+          registro($('sala-registro'), url);
+        }
+      }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (sesion?.rol === 'servidor' && document.visibilityState === 'visible') mantenerPantalla();
+    });
+    addEventListener('pagehide', () => sesion?.enviar({ tipo: 'adios' }));
+
+    // --- Navegación ---
+
+    $('ir-servidor').addEventListener('click', () => entrarSala('servidor', generarCodigo()));
+    $('ir-cliente').addEventListener('click', () => { mostrar('unirse'); $('input-codigo').focus(); });
+    $('ir-local').addEventListener('click', () => mostrar('local'));
+    $('salir').addEventListener('click', salirSala);
+    document.querySelectorAll('.volver').forEach(b => b.addEventListener('click', () => mostrar('inicio')));
+    $('form-unirse').addEventListener('submit', e => {
+      e.preventDefault();
+      const codigo = $('input-codigo').value.trim().toUpperCase();
+      if (/^[A-Z0-9]{4}$/.test(codigo)) entrarSala('cliente', codigo);
+    });
+
+    if (!soportaVibracion) {
+      $('aviso-vibracion').textContent = 'Este navegador no soporta la API de vibración: este móvil solo puede enviar.';
+    }
+
+    // Abrir con un enlace compartido (…/#CODIGO) entra directamente como cliente
+    const codigoEnlace = location.hash.slice(1).toUpperCase();
+    if (/^[A-Z0-9]{4}$/.test(codigoEnlace)) entrarSala('cliente', codigoEnlace);
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('sw.js');
